@@ -14,7 +14,7 @@ class CircularTimerCard extends LitElement {
     this._defaultTimerFill = getComputedStyle(document.documentElement).getPropertyValue('--primary-color');
     this._gradientColors = [this._defaultTimerFill, this._defaultTimerFill];
     this._defaultTimerEmptyFill = "#fdfdfd00";
-    this._secondaryInfoSize;
+    this._secondaryInfoSize = "";
     this._layout = "circle";
     
     this._name = "use_entity_friendly_name";
@@ -64,9 +64,6 @@ class CircularTimerCard extends LitElement {
     }
 
     var domain = config.entity.split(".")[0];
-    if (domain !== "timer") {
-      throw new Error("Provided entity is not a timer!");
-    }
 
     // Define the action config
     this._actionConfig = {
@@ -76,6 +73,15 @@ class CircularTimerCard extends LitElement {
         start_listening: true,
       }
     };
+
+    if (domain !== "timer") {
+      this._startTime = config.start_time || {};
+      this._endTime = config.end_time || {};
+    } else {
+      if (config.start_time || config.end_time) {
+        throw new Error("start_time and end_time must not be specified for timer entities");
+      }
+    }
 
     if (config.layout) {
       if (config.layout === "minimal") {
@@ -175,47 +181,27 @@ class CircularTimerCard extends LitElement {
       return html``;
     }
 
-    this._stateObj = this.hass.states[this._config.entity];
-    if (!this._stateObj) {
+    const stateObj = this.hass.states[this._config.entity];
+    if (!stateObj) {
       return html` <ha-card>Unknown entity: ${this._config.entity}</ha-card> `;
     }
 
     if (this._name == "use_entity_friendly_name") {
-      this._name = this._stateObj.attributes.friendly_name;
+      this._name = stateObj.attributes.friendly_name;
     }
 
     var icon;
     var icon_style;
     if (this._icon == "use_entity_icon") {
-      icon = this._stateObj.attributes.icon;
-    }  else if (this._icon == "none") {
+      icon = stateObj.attributes.icon;
+    } else if (this._icon == "none") {
       icon = "";
       icon_style = "display:none;";
     } else {
       icon = this._icon;
     }
 
-    var a = this._stateObj.attributes.duration.split(':');
-    var d_sec = (+a[0]) * 60 * 60 + (+a[1]) * 60 + (+a[2]);
-    var rem_sec;
-    if (this._stateObj.state == "active") {
-      if (this._direction == "countup") {
-        rem_sec = d_sec - ((Date.parse(this._stateObj.attributes.finishes_at) - new Date()) / 1000);
-      } else {
-        rem_sec = ((Date.parse(this._stateObj.attributes.finishes_at) - new Date()) / 1000);
-      }
-    } else {
-      if (this._stateObj.state == "paused") {
-        var a1 = this._stateObj.attributes.remaining.split(':');
-        if (this._direction == "countup") {
-          rem_sec = d_sec - ((+a1[0]) * 60 * 60 + (+a1[1]) * 60 + (+a1[2]));
-        } else {
-          rem_sec = (+a1[0]) * 60 * 60 + (+a1[1]) * 60 + (+a1[2]);
-        }
-      } else {
-        rem_sec = d_sec;
-      }
-    }
+    const { rem_sec, d_sec } = this._parseState(stateObj);
     var proc = rem_sec / d_sec;
 
     var limitBin = Math.floor(this._bins * proc);
@@ -292,6 +278,63 @@ class CircularTimerCard extends LitElement {
     }
   }
 
+  _parseState(stateObj) {
+    if (this._config.entity.startsWith("timer.")) {
+      return this._parseStateTimer(stateObj);
+    }
+
+    const startTS = this._parseValue(stateObj, this._startTime);
+    const endTS = this._parseValue(stateObj, this._endTime);
+    const nowTS = new Date().valueOf();
+
+    const d_sec = endTS - startTS;
+    const rem_sec = Math.max(endTS - nowTS, 0);
+
+    return { d_sec, rem_sec };
+  }
+
+  _parseValue(stateObj, valConfig) {
+    const val = valConfig.attribute ? stateObj.attributes[valConfig.attribute] : stateObj.state;
+
+    const numVal = parseFloat(val);
+    if (!isNaN(val) && !isNaN(numVal)) {
+      return numVal;
+    }
+
+    const dateVal = new Date(val);
+    if (!isNaN(dateVal)) {
+      return dateVal.valueOf();
+    }
+
+    throw new Error("unparseable timestamp");
+  }
+
+  _parseStateTimer(stateObj) {
+    const a = stateObj.attributes.duration.split(':');
+    const d_sec = (+a[0]) * 60 * 60 + (+a[1]) * 60 + (+a[2]);
+    let rem_sec;
+    if (stateObj.state == "active") {
+      if (this._direction == "countup") {
+        rem_sec = d_sec - ((Date.parse(stateObj.attributes.finishes_at) - new Date()) / 1000);
+      } else {
+        rem_sec = ((Date.parse(stateObj.attributes.finishes_at) - new Date()) / 1000);
+      }
+    } else {
+      if (stateObj.state == "paused") {
+        var a1 = stateObj.attributes.remaining.split(':');
+        if (this._direction == "countup") {
+          rem_sec = d_sec - ((+a1[0]) * 60 * 60 + (+a1[1]) * 60 + (+a1[2]));
+        } else {
+          rem_sec = (+a1[0]) * 60 * 60 + (+a1[1]) * 60 + (+a1[2]);
+        }
+      } else {
+        rem_sec = d_sec;
+      }
+    }
+
+    return { rem_sec, d_sec };
+  }
+
   _generateArcData() {
     var data = [];
     for (var i = 0; i < this._bins; i++){
@@ -359,12 +402,18 @@ class CircularTimerCard extends LitElement {
   }
 
   _toggle_func() {
+    if (!this._config.entity.startsWith("timer.")) {
+      return;
+    }
     const stateObj = this.hass.states[this._config.entity];
     const service = stateObj.state === "active" ? "pause" : "start";  
     this.hass.callService("timer", service, { entity_id: this._config.entity });
   }
 
   _cancel_func() {
+    if (!this._config.entity.startsWith("timer.")) {
+      return;
+    }
     const stateObj = this.hass.states[this._config.entity];
     this.hass.callService("timer", "cancel", { entity_id: this._config.entity });
   }
